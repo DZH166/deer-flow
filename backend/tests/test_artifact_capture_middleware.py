@@ -390,3 +390,54 @@ class TestCapture:
         assert generate_handle("thread_1", "call_fresh", 0) in handles, "fresh capture was dropped"
         consumed = next(entry for entry in out["tool_artifacts"] if entry["handle"] == existing_handle)
         assert consumed["consumed_by"] == ["call_new"], "consumption update was dropped"
+
+
+class TestThreadIdResolution:
+    """SDK graphs pass the thread id through ``config.configurable`` (#8358).
+
+    ``create_deerflow_agent`` forwards no context schema, so ``runtime.context``
+    carries no thread id for them; the run config is the channel
+    ``ThreadDataMiddleware`` already accepts. Capture must resolve the same
+    channel instead of dropping every tool-result artifact.
+    """
+
+    @staticmethod
+    def _config(thread_id: str | None) -> dict:
+        return {"configurable": {} if thread_id is None else {"thread_id": thread_id}}
+
+    @staticmethod
+    def _run_config_id(monkeypatch, thread_id: str | None) -> None:
+        from deerflow.agents.middlewares import artifact_capture_middleware
+
+        monkeypatch.setattr(artifact_capture_middleware, "get_config", lambda: TestThreadIdResolution._config(thread_id))
+
+    def test_captures_artifact_when_thread_id_comes_from_run_config(self, monkeypatch):
+        self._run_config_id(monkeypatch, "thread_cfg")
+        middleware = ArtifactCaptureMiddleware()
+        msg = _tool_message("wrote file", artifact={"structured_content": {"file": "/mnt/user-data/outputs/report.md"}})
+
+        out = middleware.before_model({"messages": [msg]}, SimpleNamespace(context=None))
+
+        assert out is not None, "a config-supplied thread id must not skip capture"
+        (entry,) = out["tool_artifacts"]
+        assert entry["real_ref"] == "/mnt/user-data/outputs/report.md"
+        # Handles are derived from the resolved thread id: a config-supplied id
+        # must produce the same handle the runtime-context path produces.
+        assert entry["handle"] == generate_handle("thread_cfg", "call_1", 0)
+
+    def test_runtime_context_wins_over_run_config(self, monkeypatch):
+        self._run_config_id(monkeypatch, "thread_cfg")
+        middleware = ArtifactCaptureMiddleware()
+        msg = _tool_message("wrote file", artifact={"structured_content": {"file": "/mnt/user-data/outputs/report.md"}})
+
+        out = middleware.before_model({"messages": [msg]}, _runtime("thread_ctx"))
+
+        assert out is not None
+        assert out["tool_artifacts"][0]["handle"] == generate_handle("thread_ctx", "call_1", 0)
+
+    def test_direct_hook_call_without_a_run_context_stays_a_noop(self):
+        """``get_config`` raises outside a run; the hook must not crash callers."""
+        middleware = ArtifactCaptureMiddleware()
+        msg = _tool_message("wrote file", artifact={"structured_content": {"file": "/mnt/user-data/outputs/report.md"}})
+
+        assert middleware.before_model({"messages": [msg]}, SimpleNamespace(context=None)) is None

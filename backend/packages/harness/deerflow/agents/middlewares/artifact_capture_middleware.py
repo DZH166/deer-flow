@@ -17,6 +17,7 @@ from typing import Any, cast, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ArtifactEntry
@@ -80,8 +81,26 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
         return merged or None
 
     def _thread_id(self, runtime: Runtime | None) -> str:
+        """Resolve the thread id from the runtime context, then the run config.
+
+        ``runtime.context`` is empty for graphs that receive their thread id the
+        SDK way (``config={"configurable": {"thread_id": ...}}``), which is also
+        what ``ThreadDataMiddleware`` accepts. Reading only the context made
+        capture silently skip every artifact for those graphs: the tool result
+        carried a resolvable reference, the state stayed empty, and the next
+        model call no longer saw the file. ``get_config()`` raises when a caller
+        invokes the hook directly instead of inside a LangGraph run; that path
+        simply has no config to read.
+        """
         context = getattr(runtime, "context", None)
         tid = context.get("thread_id") if isinstance(context, dict) else None
+        if not tid:
+            try:
+                config = get_config()
+            except RuntimeError:
+                return ""
+            configurable = config.get("configurable") if isinstance(config, dict) else None
+            tid = configurable.get("thread_id") if isinstance(configurable, dict) else None
         return str(tid) if tid else ""
 
     def _capture(self, state: AgentState, runtime: Runtime | None) -> dict | None:
