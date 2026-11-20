@@ -35,6 +35,24 @@ def find_pnpm_command() -> list[str] | None:
     return find_corepack_command()
 
 
+def spawn_command(command: Sequence[str]) -> list[str]:
+    """Prepare ``command`` for subprocess.run without cmd.exe AutoRun interference.
+
+    On Windows, CreateProcess silently routes ``.cmd``/``.bat`` files through
+    ``cmd.exe /c``, which first executes the machine's AutoRun registry command
+    (``HKLM\\...\\Command Processor\\AutoRun``). When that command prints to
+    stdout/stderr, or fails because it is not on PATH, its output leaks into the
+    runner's streams and the ``/c`` exit status is overwritten (``cmd.exe``
+    returns 1 even when the batch file itself exits 0). ``/d`` makes the
+    interpreter skip AutoRun, so the runner observes only the pnpm shim's own
+    output and exit status.
+    """
+    if os.name != "nt" or not command[0].lower().endswith((".cmd", ".bat")):
+        return list(command)
+    comspec = os.environ.get("COMSPEC") or "cmd.exe"
+    return [comspec, "/d", "/c", *command]
+
+
 def run_pnpm(arguments: Sequence[str]) -> int:
     """Run pnpm with the supplied arguments and propagate its exit status."""
     command = find_pnpm_command()
@@ -60,7 +78,7 @@ def run_pnpm(arguments: Sequence[str]) -> int:
             return 127
         try:
             probe = subprocess.run(
-                [command[0], "--version"],
+                spawn_command([command[0], "--version"]),
                 capture_output=True,
                 text=True,
                 stdin=subprocess.DEVNULL,
@@ -90,7 +108,7 @@ def run_pnpm(arguments: Sequence[str]) -> int:
 
     try:
         result = subprocess.run(
-            [*command, *arguments],
+            spawn_command([*command, *arguments]),
             check=False,
             shell=False,
             cwd=FRONTEND_DIR,
